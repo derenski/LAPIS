@@ -1,0 +1,16 @@
+
+\begin{tabular}{l|l}
+\hline
+Method & RMSE (SE)\\
+\hline
+Synthetic Control & 0.679 (0.004)\\
+\hline
+Generalized Synthetic Control & 0.038 (0)\\
+\hline
+Synthetic Difference in Differences & 0.541 (0.002)\\
+\hline
+MC-NNM & 0.487 (0)\\
+\hline
+LAPIS & 0.033 (0)\\
+\hline
+\end{tabular}

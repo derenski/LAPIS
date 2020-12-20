@@ -1,0 +1,427 @@
+---
+title: "Application Section"
+author: "Joshua Derenski"
+output: pdf_document
+params: 
+
+  number_of_L: 1
+
+  draws_per_L: 20
+
+  N: 250
+  
+  N1: 15
+
+  Time: 200
+  
+  Time1: 7
+
+  R: 10
+
+  tau: 10
+  
+  min_iter: 10
+  
+  max_iter: 1000
+
+  tolerance: 1e-06
+
+  error: 'gaussian'
+  
+  df: 1
+  
+  L_scaling: 5
+  
+  arg_max: 3
+  
+  y_max: 4
+  
+  halfway_time: 4
+  
+  cutoff: 3
+  
+  treatment_effect_function: "up_down"
+  
+  design: "lagged_adoption"
+  
+  average_treatment_length: 6
+  
+  lag_structure: "constant"
+  
+  max_lag: 1
+  
+  rank_estimation_method: "threshold"
+  
+  output_directory: "../reports"
+---
+
+```{r, echo=F, message=F, warning=F}
+library(dplyr)
+library(ggplot2)
+library(openxlsx)
+library(usmap)
+library(stringr)
+library(glmnet)
+library(foreach)
+library(doParallel)
+library(quadprog)
+library(reshape2)
+library(LaplacesDemon)
+
+max_available_clusters <- detectCores()-1
+  
+desired_clusters <- 20
+  
+cl <- makeCluster(min(c(max_available_clusters, desired_clusters)))
+
+registerDoParallel(cl)
+source('causal_inference_methods_code.R')
+```
+
+
+
+```{r, echo=F}
+
+# 3729 = GOOD SEED
+
+set.seed(3729)
+
+number_of_L <- params$number_of_L
+
+draws_per_L <- params$draws_per_L
+
+N <- params$N
+
+N0 <- N-params$N1
+
+Time <- params$Time
+
+Time0 <- Time-params$Time1
+
+R <- params$R
+
+tau <- params$tau
+
+tolerance <- as.numeric(params$tolerance)
+
+error = params$error
+
+df <- params$df
+
+rank_estimation_method <- params$rank_estimation_method
+
+L_scaling <- params$L_scaling
+
+arg_max <- params$arg_max
+  
+y_max <- params$y_max
+  
+halfway_time <- params$halfway_time
+
+cutoff <- params$cutoff
+
+design <- params$design
+
+lag_structure <- params$lag_structure
+
+average_treatment_length <- min(params$average_treatment_length, Time-Time0)
+
+max_lag <- params$max_lag
+
+treatment_function <- list_of_functions[[params$treatment_effect_function]]
+
+```
+
+# Block Design vs Lagged Adoption Design 
+
+
+```{r}
+
+design <- 'lagged_adoption'
+
+if (design=="lagged_adoption"){ ## Come up with a way to vary the lag in the lagged structure
+  
+  if(lag_structure == "random"){
+    
+    ones_we_make <- c(rep(0, N0), pmin(rpois(N-N0, 
+                                            lambda=average_treatment_length-1)+1, 
+                                      min(max_lag*(N-N0), .8*Time)))
+    
+  }else if (lag_structure=="constant"){ ## Does not control T-T0
+    
+    ones_we_make <- c(rep(0, N0), pmin(max_lag*seq(1, (N-N0)), floor(.8*Time)))
+    
+  }
+
+}else if (design=="block_treatment"){
+  
+  ones_we_make <- c(rep(0, N0), rep(Time-Time0, N-N0))
+  
+}
+
+W <- W_maker(N=N, Time=Time, ones_per_row = ones_we_make)
+
+tau_matrix <- t(apply(W, MARGIN=1, FUN=treated_matrix_creator, 
+                      f_of_t=treatment_function, arg_max=arg_max, 
+                      y_max=y_max, halfway_time=halfway_time, cutoff=cutoff))
+
+
+start_time <- apply(tau_matrix[(N0+1):N,], MARGIN=1, FUN=function(x) min(which(x!= 0)))
+
+row.names(tau_matrix) <- paste0("unit_", 1:dim(tau_matrix)[1])
+
+treat_block <- tau_matrix[(N-N0):N, min(start_time):Time]
+
+delta_t <- treat_block[dim(treat_block)[1],]
+
+treat_block_long <- data.frame(melt(treat_block))
+
+names(treat_block_long) <- c("subject", "time", "blood_sugar")
+
+ggplot(treat_block_long, aes(x=time, y=blood_sugar, col=subject)) + geom_line()
+
+treat_block_idea_1 <- treat_block_long
+
+treat_block_idea_1$blood_sugar[treat_block_idea_1$blood_sugar==0] <- NA
+
+
+treatment_effect_1_and_2 <- treat_block_idea_1 %>% group_by(time) %>% summarize(mean_blood_sugar_1 = mean(blood_sugar, na.rm=T))
+
+
+treatment_effect_1_and_2$mean_blood_sugar_2 <- delta_t
+
+
+ staggered_curves <- ggplot(treat_block_long, aes(x=10*time, y=blood_sugar, col=subject)) + geom_line() + theme_bw() + xlab("Time") + ylab("Change in Blood Glucose")
+
+
+conceptual_plot <- (ggplot(treatment_effect_1_and_2, aes(x=10*time, y=mean_blood_sugar_1)) + geom_line()
++geom_line(aes(x=10*time, y=mean_blood_sugar_2), col='blue') + theme_bw()
+  + ylab("Change in Blood Glucose") + xlab("Time"))
+
+ggsave("../misc_pics/two_treatment_effects.pdf",conceptual_plot, width=5, height=3)
+ggsave("../misc_pics/staggered_curves.pdf",staggered_curves, width=5, height=3)
+```
+
+# Suicide Rates in Japan During the Lost Score
+
+Suicide is a particularly personal topic, the severity of which varies greatly by country. There are many factors that can lead to a person's decision to attempt suicide, some of which relate to economic cycles (unemployment study). For example, it has been observed that male suicide rates increase substantially during periods of economic upheaval (soviet union study, Japan study). A country where this is particularly prevalent is the case of Japan. During the early 1990s, after a period of rapid economic expansion, Japan's economic growth severely slowed, the result of a large housing bubble and poor government policy (cite a study on the Lost Decade). During the following period, referred to as the "lost decade" suicide rates increased markedly, especially for males. This period of economic recession continued into the 2000s, making the Lost decade a "Lost Score" (lost 20 years). Suicide rates continued to soar during this period.
+
+What makes Japan a unique country, not comparable to other countries during this time period is the culture's unique view towards suicide, and the extreme privacy with which this subject is regarded. As such, this country was very uniquely impacted by this economic recession. If one then wishes to estimate the associated increase in the suicide rate during this recession one must take a causal inference approach: our treatment and control groups are not directly comparable. We will examine this perspective here, comparing the estimates of suicide rate increase provided by different methods, and attempting to measure the performance of each method on this data by treating untreated cells as "treated" and then imputing their values. 
+
+## Our Data
+
+The data we have at our disposal are yearly suicide rates for 104 countries between the years 1950 and 2014. Some countries have complete records (Japan is one of thee countries), while records for others are very sparse (South Korea, for example, did not start recording suicide rates until 2006). We also have access to gender-specific rates. Due to the sparsity of many records, we will need to preprocess this data before we use analyze it. Here is an overview of this preprocessing: 
+
+1. We will remove countries with very few recorded values, particularly if there are very few recorded values during the Lost Score (1991-2010). 
+
+2. For the remaining countries, we will impute missing values, while excluding Japan from the imputation process. That way, there is no information leakage during this step. 
+
+Once we have obtained this partially imputed data, we will treat this like our complete control panel and add Japan back in, so we can estimate the untreated counterfactual for Japan during the lost decade. By "untreated counterfactual" we mean: "what would Japan's yearly suicide rate have been during the time of the Lost Score had the Lost Score not happened?"
+
+
+
+```{r, echo=F}
+#### SUICIDE DATA
+
+## 1991, Beginning of Lost Score
+
+## 2006, Japan's Basic Act for Suicide Prevention (implemented in October)
+
+## 2009: Funding for “Regional comprehensive suicide prevention emergency strengthening fund”
+
+## 2010: Institution of "National Suicide Month"
+
+set.seed(93452)
+
+suicide_data <- read.csv("./suicide data/suicide_men_per_100000_people.csv", row.names = 1)
+
+years_for_data <- seq(1950, 2016, 1)
+
+
+great_score_years <- seq(1991, 2010, 1)
+
+
+first_recording <- apply(suicide_data, 
+                         MARGIN=1, FUN=function(x) 
+                           min(which(!is.na(x))))
+
+last_recording <- apply(suicide_data, 
+                         MARGIN=1, FUN=function(x) 
+                           max(which(!is.na(x))))
+
+start_year <- years_for_data[first_recording]
+
+end_year <- years_for_data[last_recording]
+
+
+countries_we_consider <- which(start_year <= 1981 & end_year >= 2000)
+
+year_column <- as.numeric(str_extract(names(suicide_data), 
+                                      pattern="[0-9]+"))
+
+
+#na_years_each_country <- apply(suicide_data, MARGIN=1, FUN=function(x) years_for_data[is.na(x)])
+
+
+## Take countries with no missing years between 1981 and 2010
+
+#lapply(na_years_each_country, FUN=function(x) any(x %in% seq(1982, 2010, 1)))
+
+# countries_we_consider
+
+endYear <- 2010
+
+suicide_data_for_analysis <- suicide_data[countries_we_consider,year_column <= endYear]
+
+str_extract(names(suicide_data_for_analysis), pattern="[0-9]+")
+
+data_for_imputation <- suicide_data_for_analysis[row.names(suicide_data_for_analysis) != "Japan", ]
+
+
+data_for_imputation["Japan", ] <- as.numeric(suicide_data_for_analysis["Japan" ,])
+
+# completion_with_rank_estimation
+
+W_suicide_imputation <- matrix(0, nrow=dim(data_for_imputation)[1], ncol=dim(data_for_imputation)[2])
+
+W_suicide_imputation[is.na(data_for_imputation)] <- 2
+
+W_suicide_imputation[dim(W_suicide_imputation)[1], seq(1950, endYear, 1) %in% great_score_years] <- 1
+
+imputed_suicide_data <- completion_with_rank_estimation_validate_mu(
+  Y=as.matrix(data_for_imputation), W=W_suicide_imputation, initial_rank=40, K=8,
+  mu_grid=10^seq(-4,4,1), tolerance=1e-04)
+
+
+# plot(as.numeric(data_for_imputation["Japan", ]))
+
+imputed_suicide_data_with_japan <- data.frame(imputed_suicide_data$L_hat)
+
+plot(as.numeric(imputed_suicide_data_with_japan["Japan",]))
+
+
+effect_size_japan <- ts(as.numeric(suicide_data_for_analysis["Japan", ]-imputed_suicide_data$L_hat["Japan",]), start=1950)
+
+time_for_plot <- time(effect_size_japan) >= 1990
+
+plot(effect_size_japan[time_for_plot] ~ seq(1990, endYear, 1), type='l')
+
+
+```
+
+For estimating the effect of the Lost Score on suicide rates in Japan, we must confront the fact that this data is sparse: not only are we missing data from the country of interest, but we are also missing data from donor countries that could help us estimate the untreated counterfactual for Japan. To amelioriate this issue, the authors will estimate the effect of the Lost Score on suicide rates in Japan with a joint estimation method: we will treat the cells corresponding to Japan during the Lost Score as missing, along with the cells that are missing for the chosen donor countries. We can then implement a matrix-completion algorithm to estimate all the missing cells. 
+
+
+
+
+```{r}
+
+set.seed(34592)
+
+#data_for_imputation[W_suicide_imputation==1] <- imputed_suicide_data_with_japan[W_suicide_imputation==1]
+
+japan_location <- which(row.names(suicide_data_for_analysis)=="Japan")
+
+W_missing_japan <- matrix(0, nrow=dim(suicide_data_for_analysis)[1], ncol=dim(suicide_data_for_analysis)[2])
+
+W_missing_japan[japan_location, seq(1950, 2010, 1) %in% great_score_years] <- 1
+
+
+#delta_t_estimate_sdid <- SDID_general(Y=as.matrix(data_for_imputation), W=W_missing_japan,
+#                 iterations_for_coord_desc=100)
+
+
+#delta_t_estimate_sc <- synth_cont(Y=as.matrix(data_for_imputation), W=W_missing_japan)
+
+#delta_t_estimate_lapis <- LAPIS_with_rank_estimation(
+#                           Y=as.matrix(data_for_imputation), 
+#                           W=W_missing_japan, initial_rank=50,
+#                           tolerance=1e-03, 
+#                           min_iter=min_iter, max_iter=max_iter,   
+#                           mu_grid=c(10^seq(-4,2,1),
+#                           seq(2,5,1)),
+#                           warm_start=F, method = 'explicit_tau')
+
+delta_t_estimate_lapis <- LAPIS_with_rank_estimation(
+                           Y=as.matrix(data_for_imputation), 
+                           W=W_suicide_imputation,
+                           initial_rank=35,
+                           tolerance=1e-03, 
+                           min_iter=min_iter, max_iter=max_iter,   
+                           mu_grid=NULL,
+                           warm_start=F, method = 'explicit_tau')
+
+
+p_suicide <- (ggplot(NULL, aes(x=seq(1991,2010, 1), y=delta_t_estimate_lapis))
++geom_line()+theme_bw() + xlab("Year") + ylab("Increase in Suicide Rate\n (Deaths/100000)"))
+
+#if (exists("p_suicide")){
+
+#ggsave("../misc_pics/suicide_plot.pdf", p_suicide, width=5, height=3)
+  
+#}
+
+
+
+```
+
+
+# Comparing Different methods on Imputed Data 
+
+
+```{r}
+
+country_names <- row.names(data_for_imputation)
+
+all_years <- seq(1950, 2010, 1)
+
+mses_sc <- c()
+
+mses_sdid <- c()
+
+mses_alt <- c()
+
+for (country in country_names){
+
+comparison_suicide_data <- final_suicide_data[ , all_years <= 1990]
+
+country_of_interest <- which(row.names(comparison_suicide_data) == country)
+
+comparison_W <- matrix(0, nrow=dim(comparison_suicide_data)[1], 
+                       ncol=dim(comparison_suicide_data)[2])
+
+comparison_W[country_of_interest, seq(1950, 1990, 1) > 1980] <- 1
+
+delta_t_estimate_sc <- synth_cont(Y=as.matrix(comparison_suicide_data), W=comparison_W)
+    
+mses_sc <- c(mses_sc, mean(delta_t_estimate_sc^2))
+
+delta_t_estimate_sdid <- SDID_general(Y=as.matrix(comparison_suicide_data), W=comparison_W,
+                 iterations_for_coord_desc=100)
+    
+
+mses_sdid <- c(mses_sdid, mean(delta_t_estimate_sdid^2))
+
+delta_t_estimate_lapis <- LAPIS_with_rank_estimation(
+                           Y=as.matrix(comparison_suicide_data), 
+                           W=comparison_W, initial_rank=50,
+                           tolerance=1e-03, 
+                           min_iter=min_iter, max_iter=max_iter,   
+                           mu_grid=c(10^seq(-4,2,1),
+                           seq(2,5,1)),
+                           warm_start=F, method = 'explicit_tau')
+
+mses_alt <- c(mses_alt, mean(delta_t_estimate_lapis^2))
+
+print(country)
+
+}
+
+```
+
+
+
+
+
+
+
